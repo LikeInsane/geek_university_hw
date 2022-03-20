@@ -71,6 +71,7 @@ public class HBaseHW {
 
     private static void deleteTable(TableName tableName) throws IOException {
         if (admin.tableExists(tableName)) {
+            //删表前需disable表
             admin.disableTable(tableName);
             admin.deleteTable(tableName);
             System.out.println("Table Delete Successful");
@@ -80,6 +81,7 @@ public class HBaseHW {
     }
 
     private static void deleteData(TableName tableName, String rowKey) throws IOException {
+        //根据rowkey删除对应数据
         Delete delete = new Delete(Bytes.toBytes(rowKey));
         conn.getTable(tableName).delete(delete);
         System.out.println("Delete Success");
@@ -88,6 +90,7 @@ public class HBaseHW {
     private static void getData(TableName tableName, String rowKey) throws IOException {
         Get get = new Get(Bytes.toBytes(rowKey));
         if (!get.isCheckExistenceOnly()) {
+            //遍历拿到rowkey下的colName和value
             Result result = conn.getTable(tableName).get(get);
             for (Cell cell : result.rawCells()) {
                 String colName = Bytes.toString(cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength());
