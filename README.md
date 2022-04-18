@@ -1,132 +1,129 @@
-# 第三周HBase作业
-## 一.代码逻辑
+# 第六&七周SPARK-RDD作业
+## 题目一
+### 使用 RDD API 实现带词频的倒排索引
 ```java
-package week3.hbase.hw;
+package week6.spark.rdd.hw
 
-import org.apache.hadoop.conf.Configuration;
-import org.apache.hadoop.hbase.*;
-import org.apache.hadoop.hbase.client.*;
-import org.apache.hadoop.hbase.util.Bytes;
+import org.apache.log4j.{Level, Logger}
+import org.apache.spark.{SparkConf, SparkContext}
 
-import java.io.IOException;
-import java.util.Arrays;
-import java.util.HashMap;
-import java.util.List;
-import java.util.Map;
+import scala.collection.mutable
 
-public class HBaseHW {
+object InvertedIndex {
 
-    private static Connection conn = null;
-    private static Admin admin = null;
+  Logger.getLogger("org").setLevel(Level.ERROR)
 
-    static {
-        try{
-            // 建立连接
-            Configuration configuration = HBaseConfiguration.create();
-            configuration.set("hbase.zookeeper.quorum", "emr-worker-1,emr-worker-2,emr-header-1,");
-            configuration.set("hbase.zookeeper.property.clientPort", "2181");
-            conn = ConnectionFactory.createConnection(configuration);
-            admin = conn.getAdmin();
-        }catch (IOException e){
-            System.out.println("init error: " + e.getMessage());
-        }
-    }
+  def main(args: Array[String]): Unit = {
+    val conf = new SparkConf().setAppName("InvertedIndex").setMaster("local")
+    val sc = new SparkContext(conf)
 
-    public static void main(String[] args) throws IOException {
+    val path = "pandi/spark/rdd/input/"
 
-        TableName tableName = TableName.valueOf("pandi:student");
-        String rowKey = "pandi";
+    sc.wholeTextFiles(path) //读源
+      .flatMapValues(v => v.split(" ")) //将内容按" "切分=>(fileName, word)
+      .flatMap {
+        case (path, word) => path.split("/").last //获取文件名
+          .map(fileName => (word, fileName))
+      }
+      .groupByKey() //根据key分组计算词频和单词出现在哪些文件中
+      .map {
+        case (word, fileNames) =>
+          val wordCountMap = new mutable.HashMap[String, Int]()
+          for (fn <- fileNames) {
+            wordCountMap.put(fn.toString, wordCountMap.getOrElseUpdate(fn.toString, 0) + 1)
+          }
+          (word, wordCountMap)
+      }
+      .sortByKey() //按照作业格式输出
+      .map(word => s"${word._1}: ${word._2.toArray.mkString("{", ", ", "}")}")
+      .foreach(println)
 
-        // 建表
-        createTable(tableName, "info", "score");
+    sc.stop()
+  }
 
-        // 插入数据
-        Map<String, List<Long>> dataMap = new HashMap<>();
-        dataMap.put("Tom", Arrays.asList(20210000000001L, 1L, 75L, 82L));
-        dataMap.put("Jerry", Arrays.asList(20210000000002L, 1L, 85L, 67L));
-        dataMap.put("Jack", Arrays.asList(20210000000003L, 2L, 80L, 80L));
-        dataMap.put("Rose", Arrays.asList(20210000000004L, 2L, 60L, 61L));
-        dataMap.put(rowKey, Arrays.asList(20220735020155L, 2L, 68L, 72L));
+}
 
-        dataMap.forEach((k,v)->{
-            try{
-                putData(tableName, k, "info", "student_id", v.get(0).toString());
-                putData(tableName, k, "info", "class", v.get(1).toString());
-                putData(tableName, k, "score", "understanding", v.get(2).toString());
-                putData(tableName, k, "score", "programming", v.get(3).toString());
-            } catch (IOException e){
-                System.out.println("putData failed: " + e.getMessage());
-            }
-        });
+```
+### 输出结果
+![hw1](https://user-images.githubusercontent.com/16860476/163822163-273551cf-ed9d-42ab-b3b2-b98d0dfad3ce.png)
 
-        // 查看数据
-        getData(tableName, rowKey);
+## 题目二
+### Distcp 的 Spark 实现
+```java
+package week6.spark.rdd.hw
 
-        // 删除数据
-//        deleteData(tableName, rowKey);
+import org.apache.hadoop.conf.Configuration
+import org.apache.hadoop.fs.{FileSystem, FileUtil, Path}
+import org.apache.spark.{SparkConf, SparkContext}
 
-        // 删除表
-//        deleteTable(tableName);
-    }
+import scala.collection.mutable.ArrayBuffer
 
-    private static void deleteTable(TableName tableName) throws IOException {
-        if (admin.tableExists(tableName)) {
-            //删表前需disable表
-            admin.disableTable(tableName);
-            admin.deleteTable(tableName);
-            System.out.println("Table Delete Successful");
+case class SparkDistCpOptions(maxConcurrence: Int, ignoreFailures: Boolean)
+
+object DistCp {
+
+
+  def getCopyDirList(sc: SparkContext, soPath: Path, tarPath: Path, fileList: ArrayBuffer[(Path, Path)], options: SparkDistCpOptions): Unit = {
+    val fs = FileSystem.get(sc.hadoopConfiguration)
+    fs.listStatus(soPath) //获取文件列表
+      .foreach(cuPath => {
+        if (cuPath.isDirectory) {
+          val childPath = cuPath.getPath.toString.split(soPath.toString)(1)
+          val nextTargetPath = new Path(tarPath + childPath)
+          try {
+            fs.mkdirs(nextTargetPath) //在目标路径下建立对应目录
+          } catch {
+            case e: Exception => if (!options.ignoreFailures) throw e else e.getMessage
+          }
+          getCopyDirList(sc, cuPath.getPath, nextTargetPath, fileList, options) //递归调用生产文件树
         } else {
-            System.out.println("Table does not exist!");
+          fileList.append((cuPath.getPath, tarPath))
         }
-    }
+      })
+  }
 
-    private static void deleteData(TableName tableName, String rowKey) throws IOException {
-        //根据rowkey删除对应数据
-        Delete delete = new Delete(Bytes.toBytes(rowKey));
-        conn.getTable(tableName).delete(delete);
-        System.out.println("Delete Success");
-    }
+  def doCopy(sc: SparkContext, fileList: ArrayBuffer[(Path, Path)], options: SparkDistCpOptions): Unit = {
+    val fileRdd = sc.parallelize(fileList, options.maxConcurrence)
 
-    private static void getData(TableName tableName, String rowKey) throws IOException {
-        Get get = new Get(Bytes.toBytes(rowKey));
-        if (!get.isCheckExistenceOnly()) {
-            //遍历拿到rowkey下的colName和value
-            Result result = conn.getTable(tableName).get(get);
-            for (Cell cell : result.rawCells()) {
-                String colName = Bytes.toString(cell.getQualifierArray(), cell.getQualifierOffset(), cell.getQualifierLength());
-                String value = Bytes.toString(cell.getValueArray(), cell.getValueOffset(), cell.getValueLength());
-                System.out.println("Data get success, colName: " + colName + ", value: " + value);
-            }
+    fileRdd.mapPartitions(ite => {
+      val conf = new Configuration()
+      ite.foreach(tup => {
+        try {
+          FileUtil.copy(tup._1.getFileSystem(conf), tup._1, tup._2.getFileSystem(conf), tup._2, false, conf) //使用FileUtil，根据fileList将文件复制
+        } catch {
+          case e: Exception => if (!options.ignoreFailures) throw e else e.getMessage
         }
-    }
+      })
+      ite
+    }).collect()
+  }
 
-    private static void putData(TableName tableName, String rowKey, String colFamily, String colKey, String colValue) throws IOException {
-        Put put = new Put(Bytes.toBytes(rowKey));
-        put.addColumn(Bytes.toBytes(colFamily), Bytes.toBytes(colKey), Bytes.toBytes(colValue));
-        Table table = conn.getTable(tableName);
-        table.put(put);
-        System.out.println("Data insert success");
-        table.close();
-    }
+  def main(args: Array[String]): Unit = {
+    val conf = new SparkConf().setAppName("DistCp").setMaster("local")
+    val sc = new SparkContext(conf)
 
-    private static void createTable(TableName tableName, String... colFamilies) throws IOException {
-        //验证表是否存在，是则删除
-        if (admin.tableExists(tableName)) {
-            deleteTable(tableName);
-        } else {
-            TableDescriptorBuilder tdb = TableDescriptorBuilder.newBuilder(tableName);
-            for(String cf: colFamilies){
-                ColumnFamilyDescriptor cfd = ColumnFamilyDescriptorBuilder.newBuilder(Bytes.toBytes(cf)).build();
-                tdb.setColumnFamily(cfd);
-            }
-            admin.createTable(tdb.build());
-            System.out.println("Table create successful");
-        }
-    }
+    val soPath = new Path(args.head) //源
+    val tarPath = new Path(args(1)) //目标
+
+    val fileList = new ArrayBuffer[(Path, Path)]()
+
+    val options = SparkDistCpOptions(args(2).toInt, args(3).toBoolean) //discp参数: -m:最大并发数；-i 忽略失败
+
+    getCopyDirList(sc, soPath, tarPath, fileList, options)//拿到文件树
+
+    doCopy(sc, fileList, options)//复制
+
+    sc.stop()
+  }
 }
 ```
-## 二.输出结果
-不包含删除表和数据的输出结果
-![image](https://user-images.githubusercontent.com/16860476/159157840-cdc33c17-b3b1-4adf-8614-ab6e031bec09.png)
-包含删除表和数据的输出结果
-![image](https://user-images.githubusercontent.com/16860476/159157895-222e2821-368d-4372-ab30-7f7c9da33cc3.png)
+### 输出结果
+执行命令
+```
+spark-submit --class week6.spark.rdd.hw.DistCp geek-time-big-data-1.0-SNAPSHOT.jar pandi/spark pandi/sparkCopy 4 true
+```
+结果
+![image](https://user-images.githubusercontent.com/16860476/163822539-0386d639-0749-401f-a391-07663d5985a1.png)
+参数设置
+![1650292103(1)](https://user-images.githubusercontent.com/16860476/163822752-47b14ac0-6e9c-4063-aaa2-fc31346bb9b8.png)
+
