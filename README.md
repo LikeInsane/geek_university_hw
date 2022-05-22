@@ -1,68 +1,91 @@
-# 第二周MR作业
-## 一.核心代码逻辑
-Mapper代码
-```java
-public class PhoneFlowCountMapper extends Mapper<LongWritable, Text, Text, PhoneFlowBean> {
+# 第十周SPARK-RDD作业
+## 题目一
+### 实现 Compact table command
+#### 1.要求：
+添加 compact table 命令，用于合并小文件，例如表 test1 总共有 50000 个文件，每个 1MB，通过该命令，合成为 500 个文件，每个约 100MB。
+#### 2.语法：
+COMPACT TABLE table_identify [partitionSpec] [INTO fileNum FILES]；
+#### 3.说明：
+基本要求是完成以下功能：COMPACT TABLE test1 INTO 500 FILES；
+如果添加 partitionSpec，则只合并指定的 partition 目录的文件；
+如果不加 into fileNum files，则把表中的文件合并成 128MB 大小。
 
-    private Text outkey = new Text();
-    private PhoneFlowBean outvalue = new PhoneFlowBean();
+##### SqlBase.g4:
+![image](https://user-images.githubusercontent.com/16860476/169702515-56fd31a5-961d-4491-9bae-415d297fa9d2.png)
 
-    /**
-     * @param key     读取的数据的偏移量
-     * @param value   读取文件中的数据
-     * @param context 上下文
-     * @throws IOException
-     * @throws InterruptedException
-     */
-    @Override
-    protected void map(LongWritable key, Text value, Context context) throws IOException, InterruptedException {
-
-        //1.将读取的数据类型转换为String
-        String line = value.toString();
-        //2.切割数据
-        String[] lineSplit = line.split("\t");
-        //3.封装Mapper阶段输出的K,V
-        outkey.set(lineSplit[1]);
-        outvalue.setUpFlow(Long.parseLong(lineSplit[8]));
-        outvalue.setDownFlow(Long.parseLong(lineSplit[9]));
-        //4.将K,V输出
-        context.write(outkey, outvalue);
+##### SparkSqlParser.scala:
+```scala
+override def visitCompactTable(ctx: CompactTableContext): LogicalPlan = withOrigin(ctx) {
+    val table: TableIdentifier = visitTableIdentifier(ctx.tableIdentifier())
+    
+    // 可选，所以对空值处理
+    val fileNum = if (ctx.INTEGER_VALUE() != null) {
+      Some(ctx.INTEGER_VALUE().getText.toInt)
+    } else {
+      None
     }
+    
+    // 可选，所以对空值处理
+    val partition = if (ctx.partitionSpec() != null) {
+      Some(ctx.partitionSpec().getText)
+    } else {
+      None
+    }
+
+    CompactTableCommand(table, fileNum, partition)
+  }
+```
+
+##### SparkSqlParser.scala:
+```scala
+case class CompactTableCommand(
+                                table: TableIdentifier,
+                                fileNum: Option[Int],
+                                partition: Option[String]
+                              ) extends LeafRunnableCommand {
+  override def run(sparkSession: SparkSession): Seq[Row] = {
+    val dataDF: DataFrame = sparkSession.table(table)
+    
+    //未加fileNum，默认128mb合并
+    val num: Int = fileNum match {
+      case Some(i) => i
+      case None =>
+        (sparkSession
+          .sessionState
+          .executePlan(dataDF.queryExecution.logical)
+          .optimizedPlan
+          .stats.sizeInBytes / (1024L * 1024L * 128L)
+          ).toInt
+    }
+    log.warn(s"fileNum is $num")
+    val tmpTableName = table.identifier + "_tmp"
+    dataDF.write.mode(SaveMode.Overwrite).saveAsTable(tmpTableName)
+
+    if (partition.isEmpty) {
+      sparkSession.table(tmpTableName)
+        .repartition(num)
+        .write.mode(SaveMode.Overwrite)
+        .saveAsTable(table.identifier)
+    } else {
+    //选择按分区合并，需开启dynamic，否则会覆盖其余分区
+      sparkSession.conf.set("spark.sql.sources.partitionOverwriteMode", "dynamic")
+
+    //组装where条件
+      val conExpr = partition.get.trim.stripPrefix("partition(").dropRight(1)
+      log.warn(s"partition is $conExpr")
+
+      sparkSession.table(tmpTableName)
+        .where(conExpr)
+        .repartition(num)
+        .write.mode(SaveMode.Overwrite)
+        .saveAsTable(table.identifier)
+    }
+    sparkSession.sql(s"drop table if exists $tmpTableName")
+    log.warn("Compacte Table Completed.")
+    Seq()
+  }
 }
 ```
-Reducer代码
-```java
-public class PhoneFlowCountReducer extends Reducer<Text, PhoneFlowBean, Text, PhoneFlowBean> {
 
-    private PhoneFlowBean outvalue = new PhoneFlowBean();
-
-    /**
-     * @param key     : 读取的一组数据的key
-     * @param values  : 读取的一组数据的所有value
-     * @param context : 上下文
-     * @throws IOException
-     * @throws InterruptedException
-     */
-    @Override
-    protected void reduce(Text key, Iterable<PhoneFlowBean> values, Context context) throws IOException, InterruptedException {
-        //1.定义totalUp，totalDown变量用于统计上下流量
-        long totalUp = 0;
-        long totalDown = 0;
-        //2.遍历所有的value并对value进行累加
-        for (PhoneFlowBean value : values) {
-            //对value进行累加
-            totalUp += value.getUpFlow();
-            totalDown += value.getDownFlow();
-        }
-        //3.封装KV，并求总流量
-        outvalue.setUpFlow(totalUp);
-        outvalue.setDownFlow(totalDown);
-        outvalue.setTotalFlow(totalUp+totalDown);
-
-        //4.写出数据
-        context.write(key, outvalue);
-    }
-}
-```
-## 二.输出结果（部分截图）
-![image](https://user-images.githubusercontent.com/16860476/158023547-69e4afa1-0535-4cde-8a9c-ad02e719ec60.png)
+### 输出结果
+![image](https://user-images.githubusercontent.com/16860476/169703069-3a747cb2-1b6e-43d4-afa3-1ee104217962.png)
