@@ -115,14 +115,136 @@ JOIN student d
 
 ## 八. 查询没学过"张三"老师授课的同学的信息
 ```sql
-SELECT d.*
-FROM (select * from teacher where t_name != '张三') a
-JOIN course b
-    ON a.t_id = b.t_id
-JOIN score c
-    ON b.c_id = c.c_id
-JOIN student d
-    ON c.s_id = d.s_id; 
+SELECT s.*
+FROM student s
+WHERE s.s_id NOT IN
+    (SELECT st.s_id
+    FROM student st
+    LEFT JOIN score sc
+        ON sc.s_id=st.s_id
+    LEFT JOIN course c
+        ON c.c_id=sc.c_id
+    LEFT JOIN teacher t
+        ON t.t_id=c.t_id
+    WHERE t.t_name="张三" ) ;
 ```
-![image](https://user-images.githubusercontent.com/16860476/212464322-0277c59b-889f-4c66-8a99-343835ea35db.png)
+![image](https://user-images.githubusercontent.com/16860476/213989355-74d1fd76-594b-4f50-bbf3-ecbdb31b22b7.png)
 
+## 九. 查询学过编号为"01"并且也学过编号为"02"的课程的同学的信息
+```sql
+SELECT s.*
+FROM 
+    (SELECT a.s_id,
+         a.s_score
+    FROM 
+        (SELECT *
+        FROM score sc
+        WHERE sc.c_id = '01') a
+        JOIN 
+            (SELECT *
+            FROM score sc
+            WHERE sc.c_id = '02') b
+                ON a.s_id = b.s_id) c
+        JOIN student s
+        ON c.s_id = s.s_id;
+```
+![image](https://user-images.githubusercontent.com/16860476/213991056-417e057f-c4ed-498b-a277-bf5dac79b017.png)
+
+## 十. 查询学过编号为"01"但是没有学过编号为"02"的课程的同学的信息
+```sql
+SELECT c.* from
+    (SELECT *
+    FROM 
+        (SELECT s_id
+        FROM score
+        WHERE c_id = '01') a
+        WHERE s_id NOT IN 
+            (SELECT s_id
+            FROM score
+            WHERE c_id = '02') ) b
+        JOIN student c
+        ON b.s_id = c.s_id;
+```
+![image](https://user-images.githubusercontent.com/16860476/213993549-03445d1c-0e03-4d2f-b71a-40157207500a.png)
+
+## 十一. 查询没有学全所有课程的同学的信息
+```sql
+SELECT student.*
+FROM student, 
+    (SELECT st.s_id
+    FROM student st
+    LEFT JOIN score AS sc
+        ON st.s_id=sc.s_id
+    GROUP BY  st.s_id
+    HAVING count(distinct sc.c_id)<
+        (SELECT count(c_id)from course))as s
+        WHERE student.s_id=s.s_id;
+```
+![image](https://user-images.githubusercontent.com/16860476/213996712-04f0c876-471a-46f1-9a44-abffc7a29ef0.png)
+
+## 十二. 查询至少有一门课与学号为"01"的同学所学相同的同学的信息
+```sql
+SELECT DISTINCT b.*
+FROM 
+    (SELECT s_id
+    FROM score
+    WHERE c_id IN 
+        (SELECT c_id
+        FROM score
+        WHERE s_id = '01')) a
+    JOIN student b
+    ON a.s_id = b.s_id
+        AND a.s_id!='01';
+```
+![image](https://user-images.githubusercontent.com/16860476/213998196-614de41f-2f63-4c82-91df-806c22cfe4b4.png)
+
+## 十三. 查询和"01"号的同学学习的课程完全相同的其他同学的信息
+```sql
+SELECT a.*
+FROM student a
+WHERE a.s_id IN 
+    (SELECT s_id
+    FROM score
+    WHERE s_id != '01'
+            AND c_id IN 
+        (SELECT c_id
+        FROM score
+        WHERE s_id = '01')
+        GROUP BY  s_id
+        HAVING count(c_id)= 
+            (SELECT count(c_id)
+            FROM score
+            WHERE s_id = '01'));
+```
+
+## 十四. 查询没学过"张三"老师讲授的任一门课程的学生姓名
+```sql
+SELECT st.s_name
+FROM student st
+WHERE st.s_id NOT IN 
+    (SELECT sc.s_id
+    FROM score sc
+    JOIN course c
+        ON c.c_id=sc.c_id
+    JOIN teacher t
+        ON t.t_id=c.t_id
+            AND t.t_name="张三" );
+```
+![image](https://user-images.githubusercontent.com/16860476/214008354-13445eb1-999a-486f-9beb-ebc812a6c794.png)
+
+## 十五. 查询两门及其以上不及格课程的同学的学号，姓名及其平均成绩
+```sql
+SELECT a.s_id,
+         a.s_name,
+         b.avg_score
+FROM student a
+JOIN 
+    (SELECT s_id,
+         AVG(s_score) avg_score
+    FROM score
+    WHERE s_score<60
+    GROUP BY  s_id
+    HAVING count(c_id)>=2 ) b
+    ON a.s_id=b.s_id;
+```
+![image](https://user-images.githubusercontent.com/16860476/214011213-400b29e9-8628-48ad-89ab-f80e55e7ab80.png)
