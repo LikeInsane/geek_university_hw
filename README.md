@@ -1,3 +1,4 @@
+## Code
 ```scala
 import org.apache.spark.sql.{SparkSession, functions}
 import org.apache.spark.sql.functions.{sum, avg}
